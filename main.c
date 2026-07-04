@@ -1,8 +1,8 @@
 // voxel6d — 6D first-person voxel game, GPU 6D DDA raytracer
+// 64^6 fully procedural world (no edit storage - would be 64GB)
 // Controls: WASD=move, Space/Shift=Y, Q/E=W, R/F=V
-//           Z/X=lookW(WARP!), MMB+drag=look extra dims
-//           LMB=break, RMB=place, 1-7=block, Tab=unlock mouse
-// Click window to lock mouse (Wayland-safe)
+//           Z/X=lookW(WARP!), C/V=lookV, MMB+drag=look extra dims
+//           Tab=unlock mouse, Click=lock mouse
 #include "raylib.h"
 #include "raymath.h"
 #include "rlgl.h"
@@ -11,45 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define XS 32
-#define YS 32
-#define ZS 32
-#define WS 8
-#define VS 8
-#define US 1
+#define WLD 64   // world size in every axis
 #define FOCAL_DEG 70.0f
-
-// Edit texture: 512x512 covers XS*YS*ZS*WS*VS*US = 32*32*32*8*8 = 262144 entries
-#define TEXW 512
-#define TEXH 512
-
-static unsigned char world[XS][YS][ZS][WS][VS][US];
-
-static int getBlock(int x,int y,int z,int w,int v,int u){
-    if(x<0||y<0||z<0||w<0||v<0||u<0) return 0;
-    if(x>=XS||y>=YS||z>=ZS||w>=WS||v>=VS||u>=US) return 0;
-    return world[x][y][z][w][v][u];
-}
-static void setBlock(int x,int y,int z,int w,int v,int u,int t){
-    if(x<0||y<0||z<0||w<0||v<0||u<0) return;
-    if(x>=XS||y>=YS||z>=ZS||w>=WS||v>=VS||u>=US) return;
-    world[x][y][z][w][v][u]=(unsigned char)t;
-}
-
-static int hash6(int x,int z,int wv){
-    unsigned int h=(unsigned)(x*73856093^z*19349663^wv*83492791);
-    h^=h>>13;h*=1274126177u;h^=h>>16;return(int)(h&0x7fffffff);
-}
-static int terrainH(int x,int z,int w,int v){return 4+hash6(x,z,w*7+v*3)%8;}
-
-static void genWorld(void){
-    for(int w=0;w<WS;w++) for(int v=0;v<VS;v++) for(int u=0;u<US;u++)
-    for(int x=0;x<XS;x++) for(int z=0;z<ZS;z++){
-        int h=terrainH(x,z,w,v);
-        for(int y=0;y<h-1;y++) setBlock(x,y,z,w,v,u,(y<h-3)?3:1);
-        setBlock(x,h-1,z,w,v,u,2);
-    }
-}
 
 // 6D view matrix
 static float VM[6][6];
@@ -62,25 +25,21 @@ static void buildView(float yaw,float pitch,float lw,float lv){
     vmId();vmRot(0,2,yaw);vmRot(1,2,-pitch);vmRot(2,3,lw);vmRot(2,4,lv);
 }
 
-static unsigned char texR[TEXW*TEXH*4];
-static Texture2D editTex;
-
-static void syncEditTex(void){
-    memset(texR,0,sizeof(texR));
-    for(int v=0;v<VS;v++) for(int w=0;w<WS;w++)
-    for(int z=0;z<ZS;z++) for(int y=0;y<YS;y++) for(int x=0;x<XS;x++){
-        int idx=(x+XS*(y+YS*(z+ZS*(w+WS*v))))*4;
-        if(idx<0||idx>=TEXW*TEXH*4) continue;
-        int b=world[x][y][z][w][v][0];
-        int h=terrainH(x,z,w,v);
-        if(b==0 && y<h)      texR[idx]=255; // broke (explicit air)
-        else if(b!=0 && y>=h) texR[idx]=(unsigned char)b; // placed above terrain
-        texR[idx+3]=255;
-    }
-    UpdateTexture(editTex,texR);
+// C-side DDA for crosshair hit detection
+// terrain: block exists if y < 8 + hash(x,z,w,v)%8
+static int terrainH(int x,int z,int w,int v){
+    unsigned int h=(unsigned)(x*73856093^z*19349663^(w*7+v*3)*83492791);
+    h^=h>>13;h*=1274126177u;h^=h>>16;return 8+(int)(h%8u);
 }
-
-static bool dda6(float pos[6],float dir[6],int hvox[6],int *lastAxis,int *lastStep){
+static int blockAt6(int x,int y,int z,int w,int v){
+    if(x<0||y<0||z<0||w<0||v<0) return 0;
+    if(x>=WLD||y>=WLD||z>=WLD||w>=WLD||v>=WLD) return 0;
+    int h=terrainH(x,z,w,v);
+    if(y>=h) return 0;
+    if(y<h-1) return (y<h-3)?3:1;
+    return 2;
+}
+static bool dda6(float pos[6],float dir[6],int hvox[6]){
     float tM[6],tD[6]; int st[6],v[6];
     for(int i=0;i<6;i++){
         v[i]=(int)floorf(pos[i]);
@@ -89,19 +48,13 @@ static bool dda6(float pos[6],float dir[6],int hvox[6],int *lastAxis,int *lastSt
         st[i]=d>0?1:-1; tD[i]=fabsf(1.f/d);
         tM[i]=d>0?(v[i]+1-pos[i])/d:(pos[i]-v[i])/(-d);
     }
-    *lastAxis=2;*lastStep=1;
     for(int it=0;it<200;it++){
-        int b=getBlock(v[0],v[1],v[2],v[3],v[4],v[5]);
-        if(b){for(int i=0;i<6;i++)hvox[i]=v[i];return true;}
-        float mn=tM[0];*lastAxis=0;
-        for(int i=1;i<6;i++) if(tM[i]<mn){mn=tM[i];*lastAxis=i;}
-        *lastStep=st[*lastAxis];
-        v[*lastAxis]+=st[*lastAxis];tM[*lastAxis]+=tD[*lastAxis];
-        // only stop on XZ or WV bounds (Y can be out - just empty sky/void)
-        if(v[0]<-1||v[0]>XS) break;
-        if(v[2]<-1||v[2]>ZS) break;
-        if(v[3]<0||v[3]>=WS) break;
-        if(v[4]<0||v[4]>=VS) break;
+        if(blockAt6(v[0],v[1],v[2],v[3],v[4])){ for(int i=0;i<6;i++)hvox[i]=v[i]; return true; }
+        float mn=tM[0]; int ax=0;
+        for(int i=1;i<6;i++) if(tM[i]<mn){mn=tM[i];ax=i;}
+        v[ax]+=st[ax]; tM[ax]+=tD[ax];
+        if(v[0]<-1||v[0]>WLD||v[2]<-1||v[2]>WLD) break;
+        if(v[3]<0||v[3]>=WLD||v[4]<0||v[4]>=WLD) break;
     }
     return false;
 }
@@ -126,23 +79,17 @@ static const char *FS_SRC =
 "uniform vec3 r0wvu;\n"
 "uniform vec3 r1wvu;\n"
 "uniform vec3 r2wvu;\n"
-"uniform sampler2D editTex;\n"
 "\n"
 "int terrainH(int x,int z,int w,int v){\n"
 "  uint h=uint(x)*73856093u^uint(z)*19349663u^uint(w*7+v*3)*83492791u;\n"
 "  h^=h>>13u;h*=1274126177u;h^=h>>16u;\n"
-"  return 4+int(h%8u);\n"
+"  return 8+int(h%8u);\n"
 "}\n"
 "\n"
-"int blockAt(ivec3 xyz,ivec3 wvu){\n"
-"  if(any(lessThan(xyz,ivec3(0)))||any(lessThan(wvu,ivec3(0)))) return 0;\n"
-"  if(any(greaterThanEqual(xyz,ivec3(32,32,32)))) return 0;\n"
-"  if(any(greaterThanEqual(wvu,ivec3(8,8,1)))) return 0;\n"
-"  int idx=xyz.x+32*(xyz.y+32*(xyz.z+32*(wvu.x+8*wvu.y)));\n"
-"  int eR=int(texelFetch(editTex,ivec2(idx%512,idx/512),0).r*255.0+0.5);\n"
-"  if(eR==255) return 0;\n"
-"  if(eR>0&&eR<8) return eR;\n"
-"  int h=terrainH(xyz.x,xyz.z,wvu.x,wvu.y);\n"
+"int blockAt(ivec3 xyz,ivec2 wv){\n"
+"  if(any(lessThan(xyz,ivec3(0)))||any(lessThan(wv,ivec2(0)))) return 0;\n"
+"  if(any(greaterThanEqual(xyz,ivec3(64)))|| any(greaterThanEqual(wv,ivec2(64)))) return 0;\n"
+"  int h=terrainH(xyz.x,xyz.z,wv.x,wv.y);\n"
 "  if(xyz.y>=h) return 0;\n"
 "  if(xyz.y<h-1) return (xyz.y<h-3)?3:1;\n"
 "  return 2;\n"
@@ -157,36 +104,33 @@ static const char *FS_SRC =
 "  vec3 wdWVU=mat3(r0wvu,r1wvu,r2wvu)*rdc;\n"
 "\n"
 "  ivec3 vX=ivec3(int(floor(camPos.x)),int(floor(camPos.y)),int(floor(camPos.z)));\n"
-"  ivec3 vW=ivec3(int(floor(camExt.x)),int(floor(camExt.y)),int(floor(camExt.z)));\n"
+"  ivec2 vW=ivec2(int(floor(camExt.x)),int(floor(camExt.y)));\n"
 "  ivec3 sX=ivec3(wdXYZ.x>0.?1:(wdXYZ.x<0.?-1:0),wdXYZ.y>0.?1:(wdXYZ.y<0.?-1:0),wdXYZ.z>0.?1:(wdXYZ.z<0.?-1:0));\n"
-"  ivec3 sW=ivec3(wdWVU.x>0.?1:(wdWVU.x<0.?-1:0),wdWVU.y>0.?1:(wdWVU.y<0.?-1:0),wdWVU.z>0.?1:(wdWVU.z<0.?-1:0));\n"
+"  ivec2 sW=ivec2(wdWVU.x>0.?1:(wdWVU.x<0.?-1:0),wdWVU.y>0.?1:(wdWVU.y<0.?-1:0));\n"
 "  vec3 tdX=vec3(abs(wdXYZ.x)<1e-8?1e30:abs(1./wdXYZ.x),abs(wdXYZ.y)<1e-8?1e30:abs(1./wdXYZ.y),abs(wdXYZ.z)<1e-8?1e30:abs(1./wdXYZ.z));\n"
-"  vec3 tdW=vec3(abs(wdWVU.x)<1e-8?1e30:abs(1./wdWVU.x),abs(wdWVU.y)<1e-8?1e30:abs(1./wdWVU.y),abs(wdWVU.z)<1e-8?1e30:abs(1./wdWVU.z));\n"
+"  vec2 tdW=vec2(abs(wdWVU.x)<1e-8?1e30:abs(1./wdWVU.x),abs(wdWVU.y)<1e-8?1e30:abs(1./wdWVU.y));\n"
 "  vec3 tmX=vec3(\n"
 "    wdXYZ.x>1e-8?(float(vX.x+1)-camPos.x)/wdXYZ.x:wdXYZ.x<-1e-8?(camPos.x-float(vX.x))/(-wdXYZ.x):1e30,\n"
 "    wdXYZ.y>1e-8?(float(vX.y+1)-camPos.y)/wdXYZ.y:wdXYZ.y<-1e-8?(camPos.y-float(vX.y))/(-wdXYZ.y):1e30,\n"
 "    wdXYZ.z>1e-8?(float(vX.z+1)-camPos.z)/wdXYZ.z:wdXYZ.z<-1e-8?(camPos.z-float(vX.z))/(-wdXYZ.z):1e30);\n"
-"  vec3 tmW=vec3(\n"
+"  vec2 tmW=vec2(\n"
 "    wdWVU.x>1e-8?(float(vW.x+1)-camExt.x)/wdWVU.x:wdWVU.x<-1e-8?(camExt.x-float(vW.x))/(-wdWVU.x):1e30,\n"
-"    wdWVU.y>1e-8?(float(vW.y+1)-camExt.y)/wdWVU.y:wdWVU.y<-1e-8?(camExt.y-float(vW.y))/(-wdWVU.y):1e30,\n"
-"    wdWVU.z>1e-8?(float(vW.z+1)-camExt.z)/wdWVU.z:wdWVU.z<-1e-8?(camExt.z-float(vW.z))/(-wdWVU.z):1e30);\n"
+"    wdWVU.y>1e-8?(float(vW.y+1)-camExt.y)/wdWVU.y:wdWVU.y<-1e-8?(camExt.y-float(vW.y))/(-wdWVU.y):1e30);\n"
 "\n"
 "  int hit=0,ax=2; bool neg=false;\n"
-"  for(int i=0;i<256;i++){\n"
+"  for(int i=0;i<300;i++){\n"
 "    hit=blockAt(vX,vW); if(hit!=0) break;\n"
-"    float m0=min(tmX.x,min(tmX.y,tmX.z)),m1=min(tmW.x,min(tmW.y,tmW.z));\n"
+"    float m0=min(tmX.x,min(tmX.y,tmX.z)),m1=min(tmW.x,tmW.y);\n"
 "    if(m0<=m1){\n"
 "      if(tmX.x<=tmX.y&&tmX.x<=tmX.z){vX.x+=sX.x;tmX.x+=tdX.x;neg=sX.x<0;ax=0;}\n"
 "      else if(tmX.y<=tmX.z){vX.y+=sX.y;tmX.y+=tdX.y;neg=sX.y<0;ax=1;}\n"
 "      else{vX.z+=sX.z;tmX.z+=tdX.z;neg=sX.z<0;ax=2;}\n"
 "    } else {\n"
-"      if(tmW.x<=tmW.y&&tmW.x<=tmW.z){vW.x+=sW.x;tmW.x+=tdW.x;neg=sW.x<0;ax=3;}\n"
-"      else if(tmW.y<=tmW.z){vW.y+=sW.y;tmW.y+=tdW.y;neg=sW.y<0;ax=4;}\n"
-"      else{vW.z+=sW.z;tmW.z+=tdW.z;neg=sW.z<0;ax=5;}\n"
+"      if(tmW.x<=tmW.y){vW.x+=sW.x;tmW.x+=tdW.x;neg=sW.x<0;ax=3;}\n"
+"      else{vW.y+=sW.y;tmW.y+=tdW.y;neg=sW.y<0;ax=4;}\n"
 "    }\n"
-// only hard-stop on horizontal world bounds; let Y and extra dims pass through
-"    if(vX.x<-1||vX.x>32||vX.z<-1||vX.z>32) break;\n"
-"    if(vW.x<0||vW.x>=8||vW.y<0||vW.y>=8) break;\n"
+"    if(vX.x<-1||vX.x>64||vX.z<-1||vX.z>64) break;\n"
+"    if(vW.x<0||vW.x>=64||vW.y<0||vW.y>=64) break;\n"
 "  }\n"
 "\n"
 "  if(hit==0){float t=gl_FragCoord.y/res.y;finalColor=vec4(mix(vec3(0.45,0.65,1.),vec3(0.08,0.08,0.22),t),1.);return;}\n"
@@ -210,11 +154,6 @@ int main(void){
     InitWindow(1280,720,"voxel6d");
     SetTargetFPS(60);
     SetExitKey(0);
-    genWorld();
-
-    Image img={.data=texR,.width=TEXW,.height=TEXH,.mipmaps=1,.format=PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
-    editTex=LoadTextureFromImage(img);
-    syncEditTex();
 
     Shader shader=LoadShaderFromMemory(VS_SRC,FS_SRC);
     int locRes   =GetShaderLocation(shader,"res");
@@ -227,14 +166,10 @@ int main(void){
     int locR0wvu =GetShaderLocation(shader,"r0wvu");
     int locR1wvu =GetShaderLocation(shader,"r1wvu");
     int locR2wvu =GetShaderLocation(shader,"r2wvu");
-    int locETex  =GetShaderLocation(shader,"editTex");
 
-    // Start above center of world, looking slightly down
-    float cx=XS*0.5f,cy=YS*0.75f,cz=ZS*0.5f;
-    float cw=WS*0.5f,cv=VS*0.5f,cu=US*0.5f;
+    float cx=32,cy=22,cz=32, cw=32,cv=32,cu=0;
     float yaw=0,pitch=0.3f,look_w=0,look_v=0;
-    int selBlock=1;
-    float mspd=8.f,lspd=0.0018f,espd=2.f,lwspd=1.2f;
+    float mspd=8.f,lspd=0.0018f,espd=4.f,lwspd=1.2f;
     bool locked=false;
 
     while(!WindowShouldClose()&&!IsKeyPressed(KEY_ESCAPE)){
@@ -248,7 +183,7 @@ int main(void){
 
         if(!mmb){
             yaw  +=md.x*lspd;
-            pitch+=md.y*lspd; // mouse down = look down
+            pitch+=md.y*lspd;
             pitch=fmaxf(-1.4f,fminf(1.4f,pitch));
         } else {
             look_w+=md.x*lspd;
@@ -273,18 +208,7 @@ int main(void){
         if(IsKeyDown(KEY_LEFT_SHIFT)) cy-=mspd*dt;
         if(IsKeyDown(KEY_Q)) cw+=espd*dt; if(IsKeyDown(KEY_E)) cw-=espd*dt;
         if(IsKeyDown(KEY_R)) cv+=espd*dt; if(IsKeyDown(KEY_F)) cv-=espd*dt;
-        cw=fmaxf(0,fminf(WS-0.01f,cw)); cv=fmaxf(0,fminf(VS-0.01f,cv));
-        cu=fmaxf(0,fminf(US-0.01f,cu));
-        for(int k=KEY_ONE;k<=KEY_SEVEN;k++) if(IsKeyPressed(k)) selBlock=k-KEY_ONE+1;
-
-        float pos6[6]={cx,cy,cz,cw,cv,cu};
-        float dir6[6]; for(int j=0;j<6;j++) dir6[j]=VM[j][2];
-        int hvox[6],lax,lst; bool hit=dda6(pos6,dir6,hvox,&lax,&lst);
-        if(hit&&locked&&IsMouseButtonPressed(MOUSE_LEFT_BUTTON)){setBlock(hvox[0],hvox[1],hvox[2],hvox[3],hvox[4],hvox[5],0);syncEditTex();}
-        if(hit&&locked&&IsMouseButtonPressed(MOUSE_RIGHT_BUTTON)){
-            int pv[6];for(int i=0;i<6;i++)pv[i]=hvox[i];pv[lax]-=lst;
-            if(!getBlock(pv[0],pv[1],pv[2],pv[3],pv[4],pv[5])){setBlock(pv[0],pv[1],pv[2],pv[3],pv[4],pv[5],selBlock);syncEditTex();}
-        }
+        cw=fmaxf(0,fminf(WLD-0.01f,cw)); cv=fmaxf(0,fminf(WLD-0.01f,cv));
 
         float res2[2]={(float)GetScreenWidth(),(float)GetScreenHeight()};
         float fovTan=tanf(FOCAL_DEG*DEG2RAD*0.5f);
@@ -306,7 +230,6 @@ int main(void){
         SetShaderValue(shader,locR0wvu,r0wvu,SHADER_UNIFORM_VEC3);
         SetShaderValue(shader,locR1wvu,r1wvu,SHADER_UNIFORM_VEC3);
         SetShaderValue(shader,locR2wvu,r2wvu,SHADER_UNIFORM_VEC3);
-        SetShaderValueTexture(shader,locETex,editTex);
 
         BeginDrawing();
         ClearBackground(BLACK);
@@ -317,17 +240,15 @@ int main(void){
         int W=GetScreenWidth(),H=GetScreenHeight();
         DrawLine(W/2-10,H/2,W/2+10,H/2,WHITE);
         DrawLine(W/2,H/2-10,W/2,H/2+10,WHITE);
-        if(!locked)
-            DrawText("CLICK TO LOCK MOUSE AND PLAY",W/2-180,H/2-40,20,YELLOW);
-        DrawText("voxel6d 6D raycast",10,10,20,WHITE);
-        DrawText("WASD/Space/Shift=move  Q/E=W  R/F=V  LMB=break  RMB=place  Tab=unlock",10,34,13,LIGHTGRAY);
-        DrawText("Z/X=lookW(WARP)  C/V=lookV  MMB+drag",10,50,13,YELLOW);
+        if(!locked) DrawText("CLICK TO LOCK MOUSE",W/2-120,H/2-40,20,YELLOW);
+        DrawText("voxel6d 6D raycast  |  64^6 world",10,10,20,WHITE);
+        DrawText("WASD/Space/Shift=move  Q/E=W  R/F=V  Z/X=lookW(WARP)  C/V=lookV  MMB+drag  Tab=unlock",10,34,13,LIGHTGRAY);
         char buf[160];
-        snprintf(buf,sizeof(buf),"pos:%.1f,%.1f,%.1f  W=%.1f V=%.1f  lookW=%.2f lookV=%.2f  blk:%d",cx,cy,cz,cw,cv,look_w,look_v,selBlock);
-        DrawText(buf,10,66,13,YELLOW);
-        DrawFPS(10,82);
+        snprintf(buf,sizeof(buf),"xyz:%.1f,%.1f,%.1f  W=%.1f V=%.1f  lookW=%.2f lookV=%.2f",cx,cy,cz,cw,cv,look_w,look_v);
+        DrawText(buf,10,50,13,YELLOW);
+        DrawFPS(10,66);
         EndDrawing();
     }
-    UnloadShader(shader); UnloadTexture(editTex); CloseWindow();
+    UnloadShader(shader); CloseWindow();
     return 0;
 }
