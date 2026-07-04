@@ -98,6 +98,14 @@ static bool dda6(float pos[6],float dir[6],int hvox[6],int *lastAxis,int *lastSt
     return false;
 }
 
+// Explicit VS: avoids AMD linker issues from default VS/FS variable mismatch
+static const char *VS_SRC =
+"#version 330\n"
+"in vec3 vertexPosition;\n"
+"in vec2 vertexTexCoord;\n"
+"uniform mat4 mvp;\n"
+"void main() { gl_Position = mvp*vec4(vertexPosition,1.0); }\n";
+
 // Fragment shader — 6D DDA raytracer
 // View matrix passed as 6 vec3 pairs: vmXYZ[i] = xyz components of row i,
 // vmWVU[i] = wvu components of row i.
@@ -134,9 +142,15 @@ static const char *FS_SRC =
 "  vec3 wdXYZ = mat3(vmXYZ[0],vmXYZ[1],vmXYZ[2]) * rdCam;\n"
 "  vec3 wdWVU = mat3(vmWVU[0],vmWVU[1],vmWVU[2]) * rdCam;\n"
 "\n"
-"  // DDA setup\n"
-"  ivec3 vXYZ = ivec3(floor(camPos)), vWVU = ivec3(floor(camExt));\n"
-"  ivec3 stXYZ = ivec3(sign(wdXYZ)), stWVU = ivec3(sign(wdWVU));\n"
+"  // DDA setup — avoid ivec3(vec3) cast bugs on AMD\n"
+"  ivec3 vXYZ = ivec3(int(floor(camPos.x)),int(floor(camPos.y)),int(floor(camPos.z)));\n"
+"  ivec3 vWVU = ivec3(int(floor(camExt.x)),int(floor(camExt.y)),int(floor(camExt.z)));\n"
+"  ivec3 stXYZ = ivec3(wdXYZ.x>0.?1:(wdXYZ.x<0.?-1:0),\n"
+"                      wdXYZ.y>0.?1:(wdXYZ.y<0.?-1:0),\n"
+"                      wdXYZ.z>0.?1:(wdXYZ.z<0.?-1:0));\n"
+"  ivec3 stWVU = ivec3(wdWVU.x>0.?1:(wdWVU.x<0.?-1:0),\n"
+"                      wdWVU.y>0.?1:(wdWVU.y<0.?-1:0),\n"
+"                      wdWVU.z>0.?1:(wdWVU.z<0.?-1:0));\n"
 "  vec3 tdXYZ = vec3(\n"
 "    abs(wdXYZ.x)<1e-8?1e30:abs(1.0/wdXYZ.x),\n"
 "    abs(wdXYZ.y)<1e-8?1e30:abs(1.0/wdXYZ.y),\n"
@@ -190,11 +204,19 @@ static const char *FS_SRC =
 "    return;\n"
 "  }\n"
 "\n"
-"  vec3 cols[8] = vec3[8](vec3(0),vec3(0.47,0.31,0.16),vec3(0.25,0.48,0.18),\n"
-"    vec3(0.58,0.58,0.58),vec3(0.18,0.35,0.80),vec3(0.76,0.69,0.22),\n"
-"    vec3(0.32,0.22,0.14),vec3(0.22,0.62,0.22));\n"
-"  float sh[6] = float[6](0.72,0.88,0.54,1.0,0.76,0.82);\n"
-"  finalColor = vec4(cols[hitBlock]*sh[hitAxis]*(hitneg?0.82:1.0),1.0);\n"
+"  vec3 bc;\n"
+"  if(hitBlock==1) bc=vec3(0.47,0.31,0.16);\n"
+"  else if(hitBlock==2) bc=vec3(0.25,0.48,0.18);\n"
+"  else if(hitBlock==3) bc=vec3(0.58,0.58,0.58);\n"
+"  else if(hitBlock==4) bc=vec3(0.18,0.35,0.80);\n"
+"  else if(hitBlock==5) bc=vec3(0.76,0.69,0.22);\n"
+"  else if(hitBlock==6) bc=vec3(0.32,0.22,0.14);\n"
+"  else bc=vec3(0.22,0.62,0.22);\n"
+"  float sh;\n"
+"  if(hitAxis==0) sh=0.72; else if(hitAxis==1) sh=0.88;\n"
+"  else if(hitAxis==2) sh=0.54; else if(hitAxis==3) sh=1.0;\n"
+"  else if(hitAxis==4) sh=0.76; else sh=0.82;\n"
+"  finalColor = vec4(bc*sh*(hitneg?0.82:1.0),1.0);\n"
 "}\n";
 
 int main(void){
@@ -209,8 +231,8 @@ int main(void){
     worldTex=LoadTextureFromImage(img);
     syncTex();
 
-    // Shader (vs=NULL → raylib default vertex shader)
-    Shader shader=LoadShaderFromMemory(NULL,FS_SRC);
+    // Explicit VS avoids AMD linker errors from VS/FS interface mismatch
+    Shader shader=LoadShaderFromMemory(VS_SRC,FS_SRC);
     int locRes    =GetShaderLocation(shader,"res");
     int locFovTan =GetShaderLocation(shader,"fovTan");
     int locCamPos =GetShaderLocation(shader,"camPos");
