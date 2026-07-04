@@ -224,7 +224,7 @@ int main(void) {
         DrawText(buf,10,50,13,YELLOW);
 
         snprintf(buf,sizeof(buf),"block: %d  slice: W=%d V=%d U=%d",selBlock,iw,iv,iu);
-        DrawText(buf,10,66,13,CYAN);
+        DrawText(buf,10,66,13,SKYBLUE);
         DrawFPS(10,82);
 
         EndDrawing();
