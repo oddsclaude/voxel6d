@@ -1,6 +1,6 @@
 // voxel6d - 6D first-person voxel game
-// Extra dims: W (Q/E), V (R/F), U (T/G)
-// Look into extra dims: Z/X = look_w, C/V = look_v (makes blocks warp)
+// Extra dims: Q/E=W, R/F=V, T/G=U
+// Look into W/V: Z/X=lookW, C/V=lookV, or MMB+drag
 // LMB=break, RMB=place, 1-7=block type
 #include "raylib.h"
 #include "raymath.h"
@@ -16,8 +16,7 @@
 #define WS 6
 #define VS 6
 #define US 1
-#define FOCAL 5.0f
-#define EXTRA_VIEW 0.7f   // only see ~1 slice at a time; MMB+drag warps into adjacent
+#define FOCAL 2.5f        // low focal = dramatic warp from extra dims
 
 static unsigned char world[XS][YS][ZS][WS][VS][US];
 
@@ -148,7 +147,7 @@ typedef struct {
     float depth;
 } Face;
 
-#define MAX_FACES (XS*YS*ZS*WS*VS*US*6)
+#define MAX_FACES (XS*YS*ZS*6)
 static Face faces[MAX_FACES];
 static int nfaces;
 
@@ -186,11 +185,9 @@ int main(void){
             if(pitch>1.4f)pitch=1.4f;
             if(pitch<-1.4f)pitch=-1.4f;
         } else {
-            // MMB drag: look into W/V (like Penteract Placer)
+            // MMB drag: look into W/V
             look_w += md.x*lookSp;
             look_v -= md.y*lookSp;
-            look_w=fmaxf(-1.4f,fminf(1.4f,look_w));
-            look_v=fmaxf(-1.4f,fminf(1.4f,look_v));
         }
 
         buildView(yaw,pitch,look_w,look_v);
@@ -210,6 +207,13 @@ int main(void){
         if(IsKeyDown(KEY_F)) cv-=extraSp*dt;
         if(IsKeyDown(KEY_T)) cu+=extraSp*dt;
         if(IsKeyDown(KEY_G)) cu-=extraSp*dt;
+        // look into extra dims (causes block warp)
+        if(IsKeyDown(KEY_Z)) look_w+=lwSp*dt;
+        if(IsKeyDown(KEY_X)) look_w-=lwSp*dt;
+        if(IsKeyDown(KEY_C)) look_v+=lwSp*dt;
+        if(IsKeyDown(KEY_V)) look_v-=lwSp*dt;
+        look_w=fmaxf(-1.3f,fminf(1.3f,look_w));
+        look_v=fmaxf(-1.3f,fminf(1.3f,look_v));
 
         for(int k=KEY_ONE;k<=KEY_SEVEN;k++) if(IsKeyPressed(k)) selBlock=k-KEY_ONE+1;
 
@@ -234,52 +238,38 @@ int main(void){
             if(!getBlock(px,py,pz,iw,iv,iu)) setBlock(px,py,pz,iw,iv,iu,selBlock);
         }
 
-        // ---- Build face list ----
+        // ---- Build face list (only current integer slice) ----
         nfaces=0;
         for(int bx=0;bx<XS;bx++)
         for(int by=0;by<YS;by++)
-        for(int bz=0;bz<ZS;bz++)
-        for(int bw=0;bw<WS;bw++)
-        for(int bv=0;bv<VS;bv++)
-        for(int bu=0;bu<US;bu++){
-            int b=getBlock(bx,by,bz,bw,bv,bu);
+        for(int bz=0;bz<ZS;bz++){
+            int b=getBlock(bx,by,bz,iw,iv,iu);
             if(!b) continue;
 
-            // Extra-dim distance cull
-            float dw=(bw+0.5f)-cw,dv=(bv+0.5f)-cv,du=(bu+0.5f)-cu;
-            if(fabsf(dw)>EXTRA_VIEW||fabsf(dv)>EXTRA_VIEW||fabsf(du)>EXTRA_VIEW) continue;
-
-            // Project the 8 corners
+            // Project the 8 corners (all at this slice's extra-dim center)
+            float bwc=iw+0.5f,bvc=iv+0.5f,buc=iu+0.5f;
             Vector3 pc[8];
             bool ok=true;
             for(int i=0;i<8;i++){
                 float wx=(float)bx+(i&1);
                 float wy=(float)by+((i>>1)&1);
                 float wz=(float)bz+((i>>2)&1);
-                if(!proj6(wx,wy,wz,bw+0.5f,bv+0.5f,bu+0.5f,cx,cy,cz,cw,cv,cu,&pc[i])){
+                if(!proj6(wx,wy,wz,bwc,bvc,buc,cx,cy,cz,cw,cv,cu,&pc[i])){
                     ok=false; break;
                 }
             }
             if(!ok) continue;
 
-            // Average depth of block center
-            Vector3 ctr; proj6(bx+0.5f,by+0.5f,bz+0.5f,bw+0.5f,bv+0.5f,bu+0.5f,cx,cy,cz,cw,cv,cu,&ctr);
+            // Depth from block center
+            Vector3 ctr; proj6(bx+0.5f,by+0.5f,bz+0.5f,bwc,bvc,buc,cx,cy,cz,cw,cv,cu,&ctr);
 
-            Color bc=blockColor[b];
-            // Tint per extra-dim slice so slices are visually distinguishable
-            bc.r=(unsigned char)(bc.r*(0.7f+0.1f*bw));
-            bc.g=(unsigned char)(bc.g*(0.7f+0.1f*bv));
-            bc.b=(unsigned char)(bc.b*(0.7f+0.1f*bu));
-            // Fade blocks far in extra dims
-            float extD=(fabsf(dw)+fabsf(dv)+fabsf(du))/(EXTRA_VIEW*3.0f);
-            bc.a=(unsigned char)(fmaxf(0.3f,1.f-extD*0.65f)*bc.a);
-
+            Color bc=blockColor[b]; // full opacity
             for(int f=0;f<6;f++){
                 if(nfaces>=MAX_FACES) break;
                 Face *fc=&faces[nfaces++];
                 float sh=FSHADE[f];
                 fc->col=(Color){(unsigned char)(bc.r*sh),(unsigned char)(bc.g*sh),(unsigned char)(bc.b*sh),bc.a};
-                fc->depth=ctr.z; // sort by block center depth
+                fc->depth=ctr.z;
                 for(int k=0;k<4;k++) fc->v[k]=pc[FCONN[f][k]];
             }
         }
@@ -321,8 +311,8 @@ int main(void){
         DrawLine(W/2,H/2-10,W/2,H/2+10,WHITE);
 
         DrawText("voxel6d - 6D perspective",10,10,20,WHITE);
-        DrawText("WASD=move  Space/Shift=Y  Q/E=W  R/F=V  T/G=U",10,34,13,LIGHTGRAY);
-        DrawText("Mouse=look  MMB+mouse=look into W/V  1-7=block  LMB=break  RMB=place",10,50,13,LIGHTGRAY);
+        DrawText("WASD=move  Space/Shift=Y  Q/E=W  R/F=V  T/G=U  LMB=break  RMB=place",10,34,13,LIGHTGRAY);
+        DrawText("Z/X=lookW(WARP)  C/V=lookV  or MMB+drag  1-7=block",10,50,13,YELLOW);
 
         char buf[160];
         snprintf(buf,sizeof(buf),"xyz:%.1f %.1f %.1f  extra:W=%.2f V=%.2f U=%.2f  lookW=%.2f lookV=%.2f",
