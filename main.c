@@ -158,7 +158,7 @@ static const char *FS_SRC =
 "\n"
 "void main(){\n"
 "  vec2 ndc=(gl_FragCoord.xy/res)*2.0-1.0;\n"
-"  ndc.y=-ndc.y; ndc.x*=res.x/res.y;\n"
+"  ndc.x*=res.x/res.y;\n"
 "\n"
 "  vec3 rdc=vec3(ndc.x*fovTan,ndc.y*fovTan,1.0);\n"
 // World-space ray = VM^T * camera_ray (only rows 0,1,2 matter since rdc_wvu=0)
@@ -252,7 +252,7 @@ int main(void){
         Vector2 md=locked?GetMouseDelta():(Vector2){0,0};
         bool mmb=locked&&IsMouseButtonDown(MOUSE_MIDDLE_BUTTON);
 
-        if(!mmb){yaw-=md.x*lspd;pitch-=md.y*lspd;pitch=fmaxf(-1.4f,fminf(1.4f,pitch));}
+        if(!mmb){yaw+=md.x*lspd;pitch-=md.y*lspd;pitch=fmaxf(-1.4f,fminf(1.4f,pitch));}
         else{look_w+=md.x*lspd;look_v-=md.y*lspd;}
         if(locked&&IsKeyDown(KEY_Z)) look_w+=lwspd*dt;
         if(locked&&IsKeyDown(KEY_X)) look_w-=lwspd*dt;
