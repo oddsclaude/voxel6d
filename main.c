@@ -1,171 +1,244 @@
 #include "raylib.h"
+#include "raymath.h"
 #include <math.h>
-#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 
-#define WORLD_SIZE 8
-#define FOCAL 5.0f
+// World: 6D grid [x][y][z][w][v][u]
+// Each extra dimension has EXTRA_SIZE slices
+#define XYZ_SIZE  16
+#define EXTRA_SIZE 4   // slices per extra axis (w, v, u)
+#define BLOCK_TYPES 8
 
-// 6D point
-typedef struct { float x, y, z, w, v, u; } Vec6;
+static unsigned char world[XYZ_SIZE][XYZ_SIZE][XYZ_SIZE][EXTRA_SIZE][EXTRA_SIZE][EXTRA_SIZE];
 
-// 6D camera state
+// Camera
 typedef struct {
-    Vec6 pos;
-    float yaw, pitch;   // rotation in xy plane (yaw) and xz plane (pitch)
-    float rot_w, rot_v, rot_u; // extra axis rotations
-} Cam6;
+    Vector3 pos;
+    float yaw, pitch;
+    // Extra dimension positions (integer slice index)
+    int sw, sv, su;
+} Cam;
 
-// Simple 6D voxel world: just a flat plane at u=0,v=0,w=0 with some blocks
-static int world[WORLD_SIZE][WORLD_SIZE][WORLD_SIZE]; // x,y,z grid
+static Color blockColor[BLOCK_TYPES] = {
+    BLANK,                           // 0: air
+    (Color){120,80,40,255},          // 1: dirt
+    (Color){60,120,40,255},          // 2: grass
+    (Color){150,150,150,255},        // 3: stone
+    (Color){40,80,200,255},          // 4: water
+    (Color){200,180,60,255},         // 5: sand
+    (Color){80,60,40,255},           // 6: wood
+    (Color){60,180,60,255},          // 7: leaves
+};
 
-// Project 6D point to 3D via three perspective divides on u, v, w axes
-static Vector3 project6D(Vec6 p) {
-    float su = FOCAL / (FOCAL + p.u + 0.001f);
-    float sv = FOCAL / (FOCAL + p.v * su + 0.001f);
-    float sw = FOCAL / (FOCAL + p.w * su * sv + 0.001f);
-    return (Vector3){ p.x * su * sv * sw, p.y * su * sv * sw, p.z * su * sv * sw };
+static int getBlock(int x, int y, int z, int w, int v, int u) {
+    if (x<0||y<0||z<0||w<0||v<0||u<0) return 0;
+    if (x>=XYZ_SIZE||y>=XYZ_SIZE||z>=XYZ_SIZE) return 0;
+    if (w>=EXTRA_SIZE||v>=EXTRA_SIZE||u>=EXTRA_SIZE) return 0;
+    return world[x][y][z][w][v][u];
 }
 
-// Rotate a 6D point around the xy plane (yaw) and xz plane (pitch)
-static Vec6 rotateBasic(Vec6 p, float yaw, float pitch) {
-    float cy = cosf(yaw), sy = sinf(yaw);
-    float cp = cosf(pitch), sp = sinf(pitch);
-    // yaw: rotate x,z
-    float nx = p.x * cy - p.z * sy;
-    float nz = p.x * sy + p.z * cy;
-    p.x = nx; p.z = nz;
-    // pitch: rotate y,z
-    float ny = p.y * cp - p.z * sp;
-    nz = p.y * sp + p.z * cp;
-    p.y = ny; p.z = nz;
-    return p;
+static void setBlock(int x, int y, int z, int w, int v, int u, int type) {
+    if (x<0||y<0||z<0||w<0||v<0||u<0) return;
+    if (x>=XYZ_SIZE||y>=XYZ_SIZE||z>=XYZ_SIZE) return;
+    if (w>=EXTRA_SIZE||v>=EXTRA_SIZE||u>=EXTRA_SIZE) return;
+    world[x][y][z][w][v][u] = (unsigned char)type;
 }
 
-// Translate 6D point relative to camera
-static Vec6 relativeTo(Vec6 p, Cam6 cam) {
-    p.x -= cam.pos.x; p.y -= cam.pos.y; p.z -= cam.pos.z;
-    p.w -= cam.pos.w; p.v -= cam.pos.v; p.u -= cam.pos.u;
-    return rotateBasic(p, -cam.yaw, -cam.pitch);
-}
+// DDA raycast in current 3D slice, returns hit block pos and face normal
+static bool raycast(Vector3 origin, Vector3 dir, int sw, int sv, int su,
+                    int *hx, int *hy, int *hz, Vector3 *normal) {
+    int x = (int)floorf(origin.x);
+    int y = (int)floorf(origin.y);
+    int z = (int)floorf(origin.z);
 
-// Draw a 6D unit cube at position (bx,by,bz,bw,bv,bu) with given color
-static void drawBlock6D(int bx, int by, int bz, int bw, int bv, int bu, Color col, Cam6 cam) {
-    // 6D cube has 64 corners
-    Vector3 corners[64];
+    float dx = fabsf(dir.x) < 0.0001f ? 1e30f : 1.0f / fabsf(dir.x);
+    float dy = fabsf(dir.y) < 0.0001f ? 1e30f : 1.0f / fabsf(dir.y);
+    float dz = fabsf(dir.z) < 0.0001f ? 1e30f : 1.0f / fabsf(dir.z);
+
+    int sx = dir.x < 0 ? -1 : 1;
+    int sy = dir.y < 0 ? -1 : 1;
+    int sz = dir.z < 0 ? -1 : 1;
+
+    float tx = (dir.x < 0 ? (origin.x - x) : (x + 1 - origin.x)) * dx;
+    float ty = (dir.y < 0 ? (origin.y - y) : (y + 1 - origin.y)) * dy;
+    float tz = (dir.z < 0 ? (origin.z - z) : (z + 1 - origin.z)) * dz;
+
+    Vector3 norm = {0,0,0};
     for (int i = 0; i < 64; i++) {
-        Vec6 p = {
-            bx + ((i>>0)&1),
-            by + ((i>>1)&1),
-            bz + ((i>>2)&1),
-            bw + ((i>>3)&1) * 0.4f,
-            bv + ((i>>4)&1) * 0.4f,
-            bu + ((i>>5)&1) * 0.4f
-        };
-        Vec6 rel = relativeTo(p, cam);
-        if (rel.z < 0.1f) { corners[i] = (Vector3){9999,9999,9999}; continue; }
-        corners[i] = project6D(rel);
+        if (getBlock(x, y, z, sw, sv, su)) {
+            *hx = x; *hy = y; *hz = z;
+            *normal = norm;
+            return true;
+        }
+        if (tx < ty && tx < tz) {
+            x += sx; norm = (Vector3){-(float)sx, 0, 0}; tx += dx;
+        } else if (ty < tz) {
+            y += sy; norm = (Vector3){0, -(float)sy, 0}; ty += dy;
+        } else {
+            z += sz; norm = (Vector3){0, 0, -(float)sz}; tz += dz;
+        }
     }
+    return false;
+}
 
-    // Draw the 12 face-edges of the 3D base cube (ignoring higher dims for now)
-    int edges[12][2] = {
-        {0,1},{2,3},{4,5},{6,7},
-        {0,2},{1,3},{4,6},{5,7},
-        {0,4},{1,5},{2,6},{3,7}
-    };
-    for (int e = 0; e < 12; e++) {
-        Vector3 a = corners[edges[e][0]], b = corners[edges[e][1]];
-        if (a.x == 9999 || b.x == 9999) continue;
-        DrawLine3D(a, b, col);
+static void genWorld(void) {
+    // For each extra-dim slice, generate slightly different terrain
+    for (int w = 0; w < EXTRA_SIZE; w++)
+    for (int v = 0; v < EXTRA_SIZE; v++)
+    for (int u = 0; u < EXTRA_SIZE; u++) {
+        int groundHeight = 4 + (w + v + u) % 3;
+        for (int x = 0; x < XYZ_SIZE; x++)
+        for (int z = 0; z < XYZ_SIZE; z++) {
+            for (int y = 0; y < groundHeight - 1; y++)
+                setBlock(x, y, z, w, v, u, 1); // dirt
+            setBlock(x, groundHeight - 1, z, w, v, u, 2); // grass
+        }
+        // A column of stone in each slice
+        int cx = 6 + (w*2) % 4, cz = 6 + (v*2) % 4;
+        for (int y = groundHeight; y < groundHeight + 3 + u; y++)
+            setBlock(cx, y, cz, w, v, u, 3);
     }
 }
 
 int main(void) {
-    InitWindow(1280, 720, "voxel6d - 6D first person voxel");
+    InitWindow(1280, 720, "voxel6d - 6D slice-based voxel");
     SetTargetFPS(60);
     DisableCursor();
 
-    // Build a simple flat floor
-    for (int x = 0; x < WORLD_SIZE; x++)
-        for (int z = 0; z < WORLD_SIZE; z++)
-            world[x][0][z] = 1;
-    // A few extra blocks
-    world[3][1][3] = 2;
-    world[4][1][3] = 3;
-    world[3][1][4] = 4;
-    world[2][2][2] = 5;
+    genWorld();
 
-    Color blockColors[] = {
-        BLANK, GRAY, RED, GREEN, BLUE, YELLOW, PURPLE, ORANGE
-    };
+    Cam cam = { .pos = {8.0f, 6.5f, 8.0f}, .yaw = 0, .pitch = 0,
+                .sw = 0, .sv = 0, .su = 0 };
+    int selectedBlock = 1;
 
-    Cam6 cam = { .pos = {2.0f, 1.6f, 2.0f, 0, 0, 0}, .yaw = 0, .pitch = 0 };
+    // Slice transition timers (so you see a brief "crossfade" hint)
+    float sliceAnim = 0;
 
-    // 3D raylib camera just for rendering context
     Camera3D rcam = {
-        .position = {0,0,0},
-        .target = {0,0,-1},
+        .position = {0,0,-0.01f},
+        .target = {0,0,0},
         .up = {0,1,0},
         .fovy = 70,
         .projection = CAMERA_PERSPECTIVE
     };
 
-    float moveSpeed = 3.0f;
+    float moveSpeed = 5.0f;
     float lookSpeed = 0.002f;
 
     while (!WindowShouldClose()) {
         float dt = GetFrameTime();
+        sliceAnim = fmaxf(0, sliceAnim - dt * 4);
+
+        // Mouse look
         Vector2 md = GetMouseDelta();
         cam.yaw   += md.x * lookSpeed;
         cam.pitch -= md.y * lookSpeed;
         if (cam.pitch >  1.4f) cam.pitch =  1.4f;
         if (cam.pitch < -1.4f) cam.pitch = -1.4f;
 
-        // Movement: WASD=xz, Space/LShift=y, QE=w, RF=v, TG=u
+        // WASD movement
         float cy = cosf(cam.yaw), sy = sinf(cam.yaw);
         if (IsKeyDown(KEY_W)) { cam.pos.x += cy*moveSpeed*dt; cam.pos.z -= sy*moveSpeed*dt; }
         if (IsKeyDown(KEY_S)) { cam.pos.x -= cy*moveSpeed*dt; cam.pos.z += sy*moveSpeed*dt; }
         if (IsKeyDown(KEY_A)) { cam.pos.x -= sy*moveSpeed*dt; cam.pos.z -= cy*moveSpeed*dt; }
         if (IsKeyDown(KEY_D)) { cam.pos.x += sy*moveSpeed*dt; cam.pos.z += cy*moveSpeed*dt; }
-        if (IsKeyDown(KEY_SPACE))       cam.pos.y += moveSpeed*dt;
-        if (IsKeyDown(KEY_LEFT_SHIFT))  cam.pos.y -= moveSpeed*dt;
-        if (IsKeyDown(KEY_Q)) cam.pos.w += moveSpeed*dt;
-        if (IsKeyDown(KEY_E)) cam.pos.w -= moveSpeed*dt;
-        if (IsKeyDown(KEY_R)) cam.pos.v += moveSpeed*dt;
-        if (IsKeyDown(KEY_F)) cam.pos.v -= moveSpeed*dt;
-        if (IsKeyDown(KEY_T)) cam.pos.u += moveSpeed*dt;
-        if (IsKeyDown(KEY_G)) cam.pos.u -= moveSpeed*dt;
+        if (IsKeyDown(KEY_SPACE))      cam.pos.y += moveSpeed*dt;
+        if (IsKeyDown(KEY_LEFT_SHIFT)) cam.pos.y -= moveSpeed*dt;
+
+        // Extra dimension navigation (step by slice)
+        if (IsKeyPressed(KEY_Q)) { cam.sw = (cam.sw + 1) % EXTRA_SIZE; sliceAnim = 1; }
+        if (IsKeyPressed(KEY_E)) { cam.sw = (cam.sw - 1 + EXTRA_SIZE) % EXTRA_SIZE; sliceAnim = 1; }
+        if (IsKeyPressed(KEY_R)) { cam.sv = (cam.sv + 1) % EXTRA_SIZE; sliceAnim = 1; }
+        if (IsKeyPressed(KEY_F)) { cam.sv = (cam.sv - 1 + EXTRA_SIZE) % EXTRA_SIZE; sliceAnim = 1; }
+        if (IsKeyPressed(KEY_T)) { cam.su = (cam.su + 1) % EXTRA_SIZE; sliceAnim = 1; }
+        if (IsKeyPressed(KEY_G)) { cam.su = (cam.su - 1 + EXTRA_SIZE) % EXTRA_SIZE; sliceAnim = 1; }
+
+        // Block selection (1-7)
+        for (int k = KEY_ONE; k <= KEY_SEVEN; k++)
+            if (IsKeyPressed(k)) selectedBlock = k - KEY_ONE + 1;
+
+        // Build camera look direction
+        Vector3 forward = {
+            cosf(cam.pitch) * cosf(cam.yaw),
+            sinf(cam.pitch),
+            cosf(cam.pitch) * -sinf(cam.yaw)
+        };
+
+        // Raycast for target block
+        int hx, hy, hz;
+        Vector3 hnorm;
+        bool hit = raycast(cam.pos, forward, cam.sw, cam.sv, cam.su,
+                           &hx, &hy, &hz, &hnorm);
+
+        // Break block (left click)
+        if (hit && IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
+            setBlock(hx, hy, hz, cam.sw, cam.sv, cam.su, 0);
+
+        // Place block (right click)
+        if (hit && IsMouseButtonPressed(MOUSE_RIGHT_BUTTON)) {
+            int px = hx + (int)hnorm.x;
+            int py = hy + (int)hnorm.y;
+            int pz = hz + (int)hnorm.z;
+            if (!getBlock(px, py, pz, cam.sw, cam.sv, cam.su))
+                setBlock(px, py, pz, cam.sw, cam.sv, cam.su, selectedBlock);
+        }
+
+        // Sync raylib camera
+        rcam.position = cam.pos;
+        rcam.target = Vector3Add(cam.pos, forward);
 
         BeginDrawing();
-        ClearBackground((Color){20,20,30,255});
+        unsigned char flash = (unsigned char)(sliceAnim * 30);
+        ClearBackground((Color){10 + flash, 10, 20 + flash, 255});
 
         BeginMode3D(rcam);
-        // Draw all blocks
-        for (int x = 0; x < WORLD_SIZE; x++)
-            for (int y = 0; y < WORLD_SIZE; y++)
-                for (int z = 0; z < WORLD_SIZE; z++) {
-                    if (!world[x][y][z]) continue;
-                    int ci = world[x][y][z] % 8;
-                    // Draw in w/v/u slices near camera
-                    for (int bw = -1; bw <= 1; bw++)
-                    for (int bv = -1; bv <= 1; bv++)
-                    for (int bu = -1; bu <= 1; bu++) {
-                        Color c = blockColors[ci];
-                        // Fade blocks far in extra dims
-                        float dist = sqrtf(bw*bw + bv*bv + bu*bu);
-                        c.a = (unsigned char)(255 * (1.0f - dist*0.35f));
-                        if (c.a < 20) continue;
-                        drawBlock6D(x, y, z, bw, bv, bu, c, cam);
-                    }
-                }
+
+        // Draw current slice
+        for (int x = 0; x < XYZ_SIZE; x++)
+        for (int y = 0; y < XYZ_SIZE; y++)
+        for (int z = 0; z < XYZ_SIZE; z++) {
+            int b = getBlock(x, y, z, cam.sw, cam.sv, cam.su);
+            if (!b) continue;
+            Vector3 bp = {x + 0.5f, y + 0.5f, z + 0.5f};
+            DrawCube(bp, 1, 1, 1, blockColor[b]);
+            DrawCubeWires(bp, 1, 1, 1, (Color){0,0,0,40});
+        }
+
+        // Highlight targeted block
+        if (hit)
+            DrawCubeWires((Vector3){hx+0.5f, hy+0.5f, hz+0.5f}, 1.01f, 1.01f, 1.01f, WHITE);
+
         EndMode3D();
 
+        // Crosshair
+        int cx2 = GetScreenWidth()/2, cy2 = GetScreenHeight()/2;
+        DrawLine(cx2-10, cy2, cx2+10, cy2, WHITE);
+        DrawLine(cx2, cy2-10, cx2, cy2+10, WHITE);
+
+        // HUD
         DrawText("voxel6d", 10, 10, 20, WHITE);
-        DrawText("WASD=move  Space/Shift=up/down  QE=w  RF=v  TG=u", 10, 35, 14, LIGHTGRAY);
-        DrawFPS(10, 55);
+        DrawText("WASD=move  Space/Shift=y  Q/E=W-axis  R/F=V-axis  T/G=U-axis", 10, 34, 13, LIGHTGRAY);
+        DrawText("LClick=break  RClick=place  1-7=block type", 10, 50, 13, LIGHTGRAY);
+
         char buf[128];
-        snprintf(buf, sizeof(buf), "pos: %.1f %.1f %.1f | w=%.1f v=%.1f u=%.1f",
-            cam.pos.x, cam.pos.y, cam.pos.z, cam.pos.w, cam.pos.v, cam.pos.u);
-        DrawText(buf, 10, 75, 14, LIGHTGRAY);
+        snprintf(buf, sizeof(buf), "slice: W=%d V=%d U=%d  |  pos: %.1f %.1f %.1f",
+            cam.sw, cam.sv, cam.su, cam.pos.x, cam.pos.y, cam.pos.z);
+        DrawText(buf, 10, 66, 13, YELLOW);
+        DrawFPS(10, 82);
+
+        // Selected block indicator
+        snprintf(buf, sizeof(buf), "block: %d", selectedBlock);
+        DrawText(buf, GetScreenWidth()-100, 10, 16, blockColor[selectedBlock]);
+
+        // Slice flash indicator
+        if (sliceAnim > 0.1f) {
+            const char *msg = "--- dimension shift ---";
+            int tw = MeasureText(msg, 24);
+            DrawText(msg, (GetScreenWidth()-tw)/2, GetScreenHeight()/2 + 40,
+                     24, (Color){255,255,100,(unsigned char)(sliceAnim*200)});
+        }
+
         EndDrawing();
     }
 
