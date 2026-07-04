@@ -10,14 +10,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define XS 8
-#define YS 8
-#define ZS 8
-#define WS 4
-#define VS 4
-#define US 4
+#define XS 12
+#define YS 12
+#define ZS 12
+#define WS 6
+#define VS 6
+#define US 1
 #define FOCAL 5.0f
-#define EXTRA_VIEW 2.5f
+#define EXTRA_VIEW 0.7f   // only see ~1 slice at a time; MMB+drag warps into adjacent
 
 static unsigned char world[XS][YS][ZS][WS][VS][US];
 
@@ -90,15 +90,24 @@ static void setBlock(int x,int y,int z,int w,int v,int u,int t){
     world[x][y][z][w][v][u]=(unsigned char)t;
 }
 
+// Simple hash for pseudo-random terrain
+static int hash3(int x, int z, int w) {
+    unsigned int h = (unsigned int)(x*73856093 ^ z*19349663 ^ w*83492791);
+    h ^= h>>13; h *= 1274126177u; h ^= h>>16;
+    return (int)(h & 0x7fffffff);
+}
+
 static void genWorld(void){
     for(int w=0;w<WS;w++) for(int v=0;v<VS;v++) for(int u=0;u<US;u++){
-        int gh=3+(w+v+u)%3;
         for(int x=0;x<XS;x++) for(int z=0;z<ZS;z++){
-            for(int y=0;y<gh-1;y++) setBlock(x,y,z,w,v,u,1);
-            setBlock(x,gh-1,z,w,v,u,2);
+            // Height varies meaningfully per extra-dim slice
+            int h = 2 + hash3(x,z,w*7+v*3+u)%5;
+            for(int y=0;y<h-1;y++){
+                int bt = (y<h-3)?3:1; // stone deep, dirt near surface
+                setBlock(x,y,z,w,v,u,bt);
+            }
+            setBlock(x,h-1,z,w,v,u,2); // grass top
         }
-        setBlock(3+(w+v)%3, gh, 3+(v+u)%3, w,v,u,3);
-        setBlock(3+(w+v)%3, gh+1, 3+(v+u)%3, w,v,u,3);
     }
 }
 
@@ -154,8 +163,8 @@ int main(void){
     DisableCursor();
     genWorld();
 
-    float cx=4,cy=5,cz=4;
-    float cw=1.5f,cv=1.5f,cu=1.5f;
+    float cx=6,cy=7,cz=6;
+    float cw=2.5f,cv=2.5f,cu=0.5f;
     float yaw=0,pitch=0,look_w=0,look_v=0;
     int selBlock=1;
     float moveSpeed=5.f, lookSp=0.0018f, extraSp=1.5f, lwSp=0.8f;
@@ -205,9 +214,9 @@ int main(void){
         for(int k=KEY_ONE;k<=KEY_SEVEN;k++) if(IsKeyPressed(k)) selBlock=k-KEY_ONE+1;
 
         // Clamp extra dims to world bounds
-        if(cw<0)cw=0; if(cw>=WS)cw=WS-0.01f;
-        if(cv<0)cv=0; if(cv>=VS)cv=VS-0.01f;
-        if(cu<0)cu=0; if(cu>=US)cu=US-0.01f;
+        if(cw<0)cw=0; if(cw>WS-1)cw=WS-1;
+        if(cv<0)cv=0; if(cv>VS-1)cv=VS-1;
+        if(cu<0)cu=0; if(cu>US-0.01f)cu=US-0.01f;
 
         int iw=(int)cw,iv=(int)cv,iu=(int)cu;
 
