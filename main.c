@@ -222,7 +222,7 @@ static const char *FS_SRC =
 int main(void){
     InitWindow(1280,720,"voxel6d");
     SetTargetFPS(60);
-    DisableCursor();
+    SetExitKey(0); // don't exit on ESC (Wayland may send spurious close events)
     genWorld();
 
     // World texture (RGBA8 for max compatibility)
@@ -246,11 +246,21 @@ int main(void){
     float yaw=0,pitch=0,look_w=0,look_v=0;
     int selBlock=1;
     float mspd=5.f,lspd=0.0018f,espd=1.5f,lwspd=1.2f;
+    bool cursorLocked=false;
 
-    while(!WindowShouldClose()){
+    while(!WindowShouldClose()&&!IsKeyPressed(KEY_ESCAPE)){
         float dt=GetFrameTime();
-        Vector2 md=GetMouseDelta();
-        bool mmb=IsMouseButtonDown(MOUSE_MIDDLE_BUTTON);
+
+        // Click window to lock cursor (Wayland-safe: defer cursor lock)
+        if(!cursorLocked&&IsMouseButtonPressed(MOUSE_LEFT_BUTTON)){
+            DisableCursor(); cursorLocked=true;
+        }
+        if(cursorLocked&&IsKeyPressed(KEY_TAB)){
+            EnableCursor(); cursorLocked=false;
+        }
+
+        Vector2 md=(cursorLocked)?GetMouseDelta():(Vector2){0,0};
+        bool mmb=IsMouseButtonDown(MOUSE_MIDDLE_BUTTON)&&cursorLocked;
         if(!mmb){ yaw-=md.x*lspd; pitch-=md.y*lspd; pitch=fmaxf(-1.4f,fminf(1.4f,pitch)); }
         else { look_w+=md.x*lspd; look_v-=md.y*lspd; }
 
@@ -326,8 +336,12 @@ int main(void){
         DrawLine(W/2-10,H/2,W/2+10,H/2,WHITE);
         DrawLine(W/2,H/2-10,W/2,H/2+10,WHITE);
         DrawText("voxel6d - 6D raycast",10,10,20,WHITE);
-        DrawText("WASD/Space/Shift=move  Q/E=W  R/F=V  T/G=U  LMB=break  RMB=place  1-7=block",10,34,13,LIGHTGRAY);
-        DrawText("Z/X=lookW(WARP!)  C/V=lookV  MMB+drag",10,50,13,YELLOW);
+        if(!cursorLocked)
+            DrawText("CLICK WINDOW TO LOCK MOUSE  (Tab=unlock)",10,34,16,YELLOW);
+        else {
+            DrawText("WASD/Space/Shift=move  Q/E=W  R/F=V  T/G=U  LMB=break  RMB=place  1-7=block  Tab=unlock",10,34,13,LIGHTGRAY);
+            DrawText("Z/X=lookW(WARP!)  C/V=lookV  MMB+drag=extra-dim look",10,50,13,YELLOW);
+        }
         char buf[160];
         snprintf(buf,sizeof(buf),"pos:%.1f %.1f %.1f  W=%.2f V=%.2f U=%.2f  lookW=%.2f lookV=%.2f  block:%d",
             cx,cy,cz,cw,cv,cu,look_w,look_v,selBlock);
